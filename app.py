@@ -2,7 +2,8 @@
 """
 FinanceAgent Desktop - Executive Dark Edition
 Plataforma de Conciliação OFX & Inteligência Analítica Financeira
-Arquitetura: 100% Desktop Nativo (CustomTkinter + Matplotlib TkAgg + SQLite3)
+Arquitetura: 100% Desktop Nativo (CustomTkinter + Matplotlib TkAgg + SQLite3 WAL)
+Integridade: Idempotência Estrita, Anti-Coerção Silenciosa (Fail-Fast) e Auditoria de Lotes
 """
 
 import os
@@ -24,13 +25,27 @@ matplotlib.use("TkAgg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+# Módulo de Domínio Centralizado
+from process_extrato import (
+    REGRAS_CATEGORIAS,
+    TETOS_ORCAMENTARIOS,
+    sanitizar_texto,
+    validar_e_formatar_data_estrita,
+    limpar_valor_monetario_estrito,
+    gerar_hash_deduplicacao,
+    calcular_checksum_arquivo,
+    parse_ofx_estrito,
+    parse_csv_estrito,
+    classificar_transacao
+)
+
 # -------------------------------------------------------------
 # 1. RESILIÊNCIA DE CAMINHOS & INDEPENDÊNCIA (.EXE / ONEDRIVE)
 # -------------------------------------------------------------
 def obter_diretorio_base() -> Path:
     """
     Retorna o diretório base real da aplicação.
-    Suporta perfeitamente a execução via PyInstaller (sys.frozen) no OneDrive.
+    Suporta perfeitamente a execução via PyInstaller (sys.frozen) e no OneDrive.
     """
     if getattr(sys, 'frozen', False):
         return Path(sys.executable).parent.resolve()
@@ -41,24 +56,24 @@ BASE_DIR = obter_diretorio_base()
 PASTA_ENTRADA = BASE_DIR / "entrada"
 PASTA_SAIDA = BASE_DIR / "saida"
 DB_PATH = BASE_DIR / "finanagent.db"
-ARQUIVO_MIGRACAO_CSV = BASE_DIR / "extrato_consolidado_2026_08.csv"
 
 PASTA_ENTRADA.mkdir(parents=True, exist_ok=True)
 PASTA_SAIDA.mkdir(parents=True, exist_ok=True)
 
 # -------------------------------------------------------------
-# 2. MOTOR DE BANCO DE DADOS LOCAL (SQLITE3)
+# 2. MOTOR DE BANCO DE DADOS LOCAL (SQLITE3 WAL & IDEMPOTÊNCIA)
 # -------------------------------------------------------------
 def get_db_connection():
-    conn = sqlite3.connect(str(DB_PATH), timeout=15.0)
+    """
+    Retorna conexão SQLite resiliente com WAL mode, foreign keys e timeout de 30s.
+    """
+    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA foreign_keys=ON;")
+    conn.execute("PRAGMA busy_timeout=30000;")
     return conn
-
-def sanitizar_texto(texto: str) -> str:
-    t = str(texto).strip()
-    while t.startswith(('=', '+', '-', '@', '\t', '\r')):
-        t = t[1:].strip()
-    return t
 
 DADOS_DEMO_INICIAIS = [
     ("01/09/2026", "Extrato Bancário", "PIX RECEBIDO - CONSULTORIA TI CLIENTE ALFA", "Receitas Externas", "Consultoria", "Receita", 4850.00, "Compartilhado", "DEMO001"),
@@ -83,21 +98,12 @@ DADOS_DEMO_INICIAIS = [
     ("10/09/2026", "Cartão Débito", "POSTO IPIRANGA ABASTECIMENTO", "Transporte & Mobilidade", "Combustível", "Despesa", -180.00, "Usuário Titular", "DEMO020")
 ]
 
-def semear_dados_demonstracao_sqlite():
-    with get_db_connection() as conn:
-        registros_formatados = []
-        for r in DADOS_DEMO_INICIAIS:
-            registros_formatados.append((
-                r[0], r[1], sanitizar_texto(r[2]), r[3], r[4], r[5], r[6], r[7], "Efetivado", r[8]
-            ))
-        conn.executemany("""
-            INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, registros_formatados)
-        conn.commit()
-
 def inicializar_banco():
+    """
+    Cria as tabelas e índices garantindo idempotência e migração transparente.
+    """
     with get_db_connection() as conn:
+        # 1. Tabela Principal de Transações
         conn.execute("""
             CREATE TABLE IF NOT EXISTS transacoes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,43 +117,86 @@ def inicializar_banco():
                 responsavel TEXT NOT NULL,
                 status TEXT DEFAULT 'Efetivado',
                 fitid TEXT,
+                hash_dedup TEXT UNIQUE,
                 criado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # 2. Tabela de Auditoria de Lotes de Importação
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS import_batches (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                nome_arquivo TEXT NOT NULL,
+                checksum TEXT NOT NULL,
+                tipo_arquivo TEXT NOT NULL,
+                total_encontradas INTEGER NOT NULL,
+                total_inseridas INTEGER NOT NULL,
+                total_duplicadas INTEGER NOT NULL,
+                total_rejeitadas INTEGER NOT NULL,
+                titular TEXT NOT NULL,
+                status TEXT NOT NULL,
+                detalhes TEXT,
+                importado_em TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # 3. Migração segura para bases existentes sem hash_dedup
+        cursor = conn.cursor()
+        cursor.execute("PRAGMA table_info(transacoes)")
+        colunas = [c[1] for c in cursor.fetchall()]
+
+        if "hash_dedup" not in colunas:
+            try:
+                conn.execute("ALTER TABLE transacoes ADD COLUMN hash_dedup TEXT")
+                conn.commit()
+            except Exception as e:
+                print(f"Nota na migração de coluna: {e}")
+
+        # Popular hashes para registros pré-existentes sem hash e remover duplicatas legadas
+        cursor.execute("SELECT id, data, origem, descricao, valor_brl, responsavel, fitid FROM transacoes WHERE hash_dedup IS NULL OR hash_dedup = ''")
+        linhas_sem_hash = cursor.fetchall()
+        for r in linhas_sem_hash:
+            h = gerar_hash_deduplicacao(r[1], r[2] or "", r[3], r[4], r[5], r[6] or "")
+            cursor.execute("SELECT id FROM transacoes WHERE hash_dedup = ? AND id != ?", (h, r[0]))
+            duplicado = cursor.fetchone()
+            if duplicado:
+                conn.execute("DELETE FROM transacoes WHERE id = ?", (r[0],))
+            else:
+                conn.execute("UPDATE transacoes SET hash_dedup = ? WHERE id = ?", (h, r[0]))
         conn.commit()
 
-        cursor = conn.cursor()
+        # Índices de performance e unicidade
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_transacoes_hash ON transacoes(hash_dedup);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transacoes_data ON transacoes(data);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_transacoes_cat ON transacoes(categoria);")
+        conn.commit()
+
+        # Semeadura inicial caso a base esteja completamente vazia
         cursor.execute("SELECT COUNT(*) FROM transacoes")
         total_registros = cursor.fetchone()[0]
 
         if total_registros == 0:
-            if ARQUIVO_MIGRACAO_CSV.exists():
-                try:
-                    df_mig = pd.read_csv(ARQUIVO_MIGRACAO_CSV)
-                    registros_mig = []
-                    for _, r in df_mig.iterrows():
-                        registros_mig.append((
-                            str(r.get("Data", "01/08/2026")),
-                            str(r.get("Origem", "Extrato Inicial")),
-                            sanitizar_texto(r.get("Descricao", "Lancamento")),
-                            str(r.get("Categoria", "Outros")),
-                            str(r.get("Subcategoria", "")),
-                            str(r.get("Tipo_Movimentacao", "Despesa")),
-                            float(r.get("Valor_BRL", 0.0)),
-                            str(r.get("Responsavel", "Compartilhado")),
-                            "Efetivado",
-                            ""
-                        ))
-                    conn.executemany("""
-                        INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """, registros_mig)
-                    conn.commit()
-                except Exception as err:
-                    print(f"Erro na migracao inicial do CSV para SQLite: {err}")
-                    semear_dados_demonstracao_sqlite()
-            else:
-                semear_dados_demonstracao_sqlite()
+            semear_dados_demonstracao_sqlite()
+
+def semear_dados_demonstracao_sqlite():
+    """
+    Insere dados fictícios de demonstração de forma idempotente.
+    """
+    with get_db_connection() as conn:
+        registros_formatados = []
+        for r in DADOS_DEMO_INICIAIS:
+            dt, ori, desc, cat, subcat, tipo, val, resp, fit = r
+            h = gerar_hash_deduplicacao(dt, ori, desc, val, resp, fit)
+            registros_formatados.append((
+                dt, ori, sanitizar_texto(desc), cat, subcat, tipo, val, resp, "Efetivado", fit, h
+            ))
+        
+        conn.executemany("""
+            INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid, hash_dedup)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(hash_dedup) DO NOTHING
+        """, registros_formatados)
+        conn.commit()
 
 inicializar_banco()
 
@@ -156,118 +205,28 @@ def carregar_dados_sqlite() -> pd.DataFrame:
         df = pd.read_sql_query("SELECT * FROM transacoes ORDER BY id DESC", conn)
     return df
 
-def inserir_transacao_sqlite(data_str, origem, descricao, categoria, subcategoria, tipo, valor, responsavel, fitid=""):
+def carregar_lotes_sqlite() -> pd.DataFrame:
     with get_db_connection() as conn:
-        conn.execute("""
-            INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Efetivado', ?)
-        """, (data_str, origem, sanitizar_texto(descricao), categoria, subcategoria, tipo, valor, responsavel, fitid))
+        df = pd.read_sql_query("SELECT * FROM import_batches ORDER BY id DESC", conn)
+    return df
+
+def inserir_transacao_sqlite(data_str: str, origem: str, descricao: str, categoria: str, subcategoria: str, tipo: str, valor: float, responsavel: str, fitid: str = "") -> bool:
+    """
+    Insere transação individual garantindo unicidade por hash_dedup. Retorna True se inserido, False se duplicado.
+    """
+    data_fmt = validar_e_formatar_data_estrita(data_str)
+    desc_limpa = sanitizar_texto(descricao)
+    h = gerar_hash_deduplicacao(data_fmt, origem, desc_limpa, valor, responsavel, fitid)
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid, hash_dedup)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Efetivado', ?, ?)
+            ON CONFLICT(hash_dedup) DO NOTHING
+        """, (data_fmt, origem, desc_limpa, categoria, subcategoria, tipo, valor, responsavel, fitid, h))
         conn.commit()
-
-# -------------------------------------------------------------
-# 3. MOTOR DE REGRAS E CATEGORIZAÇÃO AUTOMÁTICA
-# -------------------------------------------------------------
-REGRAS = {
-    "Transporte & Mobilidade": [r"movida", r"posto", r"combustivel", r"gasolina", r"uber", r"99app", r"estacionamento", r"brasil park"],
-    "Alimentação - Padarias": [r"peter p[aã]o", r"celeiro do p[aã]o", r"padaria", r"caf[eé] com baguete", r"cacau show", r"confeitaria"],
-    "Alimentação - Supermercados": [r"super mini", r"hortifruti", r"carrefour", r"atacadao", r"supermercado", r"fiorotti", r"extra"],
-    "Alimentação - Restaurantes": [r"espetinho", r"sorveteria", r"restaurante", r"ifood", r"burger", r"rocon", r"lanchonete"],
-    "Compras & Varejo": [r"mercado livre", r"americanas", r"tiktok shop", r"ponto sports", r"amazon", r"shopee", r"magalu"],
-    "Assinaturas & Apps": [r"apple\.com", r"deezer", r"google play", r"meli\+", r"xbox", r"compra e volta", r"netflix", r"spotify", r"punko"],
-    "Educação": [r"unintese", r"faculdade", r"curso", r"escola"],
-    "Saúde & Farmácia": [r"drogasil", r"raia", r"drogaria", r"farmacia", r"pacheco"],
-    "Tarifas Bancárias": [r"tarifa", r"iof", r"encargos", r"limite emergencial", r"anuidade"],
-    "Família & Pessoal": [r"fabiola", r"fabíola", r"parente", r"familiar", r"dimas", r"repasse"],
-    "Investimentos & Reserva": [r"cofrinho", r"reserva por gastos", r"dizimo", r"dízimo", r"cdi"]
-}
-
-def classificar_transacao(descricao: str, valor: float) -> tuple:
-    desc = str(descricao).lower()
-    
-    if "transferencia mesma titularidade" in desc or "fluxo interno" in desc:
-        return "Fluxo Interno", "Neutro"
-    
-    if "rendimento" in desc or "cdi" in desc:
-        return "Receitas Externas", "Receita"
-        
-    for categoria, patterns in REGRAS.items():
-        for pattern in patterns:
-            if re.search(pattern, desc):
-                if categoria == "Família & Pessoal":
-                    tipo = "Receita" if valor > 0 else "Despesa"
-                elif categoria == "Investimentos & Reserva":
-                    tipo = "Reserva"
-                else:
-                    tipo = "Receita" if valor > 0 else "Despesa"
-                return categoria, tipo
-                
-    tipo = "Receita" if valor > 0 else "Despesa"
-    return "Outros / Diversos", tipo
-
-def limpar_valor_monetario(val_raw) -> float:
-    if isinstance(val_raw, (int, float)):
-        return float(val_raw)
-    s = str(val_raw).replace("R$", "").strip()
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
-    elif "," in s:
-        s = s.replace(",", ".")
-    return float(s)
-
-# -------------------------------------------------------------
-# 4. PARSER NATIVO DE OFX (SGML / XML)
-# -------------------------------------------------------------
-def processar_conteudo_ofx(conteudo_texto: str) -> list:
-    transacoes = []
-    blocos = re.findall(
-        r'<STMTTRN>(.*?)(?:</STMTTRN>|(?=<STMTTRN>)|(?=</BANKTRANLIST>)|$)', 
-        conteudo_texto, 
-        re.DOTALL | re.IGNORECASE
-    )
-    
-    for bloco in blocos:
-        m_type = re.search(r'<TRNTYPE>([^\r\n<]+)', bloco, re.IGNORECASE)
-        trntype = m_type.group(1).strip().upper() if m_type else "OTHER"
-        
-        m_dt = re.search(r'<DTPOSTED>(\d{8})', bloco, re.IGNORECASE)
-        if m_dt:
-            dt_raw = m_dt.group(1)
-            try:
-                dt_obj = datetime.strptime(dt_raw, "%Y%m%d")
-                data_str = dt_obj.strftime("%d/%m/%Y")
-            except Exception:
-                data_str = dt_raw
-        else:
-            data_str = date.today().strftime("%d/%m/%Y")
-            
-        m_val = re.search(r'<TRNAMT>([^\r\n<]+)', bloco, re.IGNORECASE)
-        if m_val:
-            val_str = m_val.group(1).strip().replace(",", ".")
-            try:
-                valor = float(val_str)
-            except Exception:
-                valor = 0.0
-        else:
-            valor = 0.0
-            
-        m_memo = re.search(r'<MEMO>([^\r\n<]+)', bloco, re.IGNORECASE)
-        m_name = re.search(r'<NAME>([^\r\n<]+)', bloco, re.IGNORECASE)
-        memo = m_memo.group(1).strip() if m_memo else ""
-        name = m_name.group(1).strip() if m_name else ""
-        descricao = memo or name or "Lançamento OFX"
-        
-        m_fitid = re.search(r'<FITID>([^\r\n<]+)', bloco, re.IGNORECASE)
-        fitid = m_fitid.group(1).strip() if m_fitid else ""
-        
-        transacoes.append({
-            "data": data_str,
-            "descricao": sanitizar_texto(descricao),
-            "valor": valor,
-            "tipo_ofx": trntype,
-            "fitid": fitid
-        })
-        
-    return transacoes
+        return cursor.rowcount > 0
 
 def listar_arquivos_entrada() -> list:
     if not PASTA_ENTRADA.exists():
@@ -287,7 +246,7 @@ def abrir_pasta_no_sistema(caminho: Path):
         messagebox.showerror("Erro de Abertura", f"Não foi possível abrir o diretório:\n{e}")
 
 # -------------------------------------------------------------
-# 5. GERADOR AUTÔNOMO DE PLANILHA EXECUTIVA (OPENPYXL)
+# 3. GERADOR AUTÔNOMO DE PLANILHA EXECUTIVA (OPENPYXL)
 # -------------------------------------------------------------
 def exportar_planilha_executiva_completa():
     df = carregar_dados_sqlite()
@@ -327,7 +286,7 @@ def exportar_planilha_executiva_completa():
         ws_dash.views.sheetView[0].showGridLines = True
         ws_dash["B2"] = "💎 FinanceAgent - Relatório Executivo Consolidado"
         ws_dash["B2"].font = font_titulo
-        ws_dash["B3"] = f"Exportação gerada em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | Base: SQLite Nativo"
+        ws_dash["B3"] = f"Exportação gerada em {datetime.now().strftime('%d/%m/%Y às %H:%M')} | Base: SQLite Nativo WAL"
         ws_dash["B3"].font = font_sub
 
         total_rec = df[df["tipo_movimentacao"] == "Receita"]["valor_brl"].sum()
@@ -437,7 +396,7 @@ def exportar_planilha_executiva_completa():
         return None
 
 # -------------------------------------------------------------
-# 6. CONFIGURAÇÃO VISUAL E TEMA DO CUSTOMTKINTER
+# 4. CONFIGURAÇÃO VISUAL E TEMA DO CUSTOMTKINTER
 # -------------------------------------------------------------
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
@@ -560,11 +519,11 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         status_header.pack(fill="x", padx=10, pady=(8, 2))
 
         ctk.CTkLabel(status_header, text="●", text_color="#10b981", font=ctk.CTkFont(size=13)).pack(side="left")
-        ctk.CTkLabel(status_header, text=" SQLite Online", text_color="#e2e8f0", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=4)
+        ctk.CTkLabel(status_header, text=" SQLite WAL Active", text_color="#e2e8f0", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left", padx=4)
 
         self.lbl_status_desc = ctk.CTkLabel(
             self.status_card, 
-            text="finanagent.db • Concorrente", 
+            text="finanagent.db • Idempotente", 
             font=ctk.CTkFont(size=10), 
             text_color="#64748b"
         )
@@ -662,7 +621,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self._montar_view_novo()
 
     def navegar_para(self, tela_nome):
-        # Reset visual dos botões
         botoes = [
             (self.btn_nav_dashboard, "dashboard"),
             (self.btn_nav_conciliar, "conciliacao"),
@@ -675,11 +633,9 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             else:
                 btn.configure(fg_color="transparent", text_color="#94a3b8")
 
-        # Esconder todas as views
         for v in [self.view_dashboard, self.view_conciliacao, self.view_extrato, self.view_novo]:
             v.grid_forget()
 
-        # Exibir a selecionada
         if tela_nome == "dashboard":
             self.lbl_view_title.configure(text="Visão Executiva de Caixa & Inteligência Analítica")
             self.view_dashboard.grid(row=0, column=0, sticky="nsew")
@@ -693,14 +649,13 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             self.view_extrato.grid(row=0, column=0, sticky="nsew")
             self.recarregar_tabela_extrato()
         elif tela_nome == "novo":
-            self.lbl_view_title.configure(text="Lançamento Manual Rápido (SQLite)")
+            self.lbl_view_title.configure(text="Lançamento Manual Rápido (SQLite WAL)")
             self.view_novo.grid(row=0, column=0, sticky="nsew")
 
     # ---------------------------------------------------------
     # VIEW 1: DASHBOARD EXECUTIVO COM KPIS E MATPLOTLIB NATIVO
     # ---------------------------------------------------------
     def _montar_view_dashboard(self):
-        # 1. KPI CARDS (TOPO)
         kpi_frame = ctk.CTkFrame(self.view_dashboard, fg_color="transparent")
         kpi_frame.pack(fill="x", pady=(0, 14))
         kpi_frame.columnconfigure((0, 1, 2, 3), weight=1)
@@ -710,14 +665,12 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self.kpi_fam, self.lbl_kpi_fam = self._criar_card_kpi(kpi_frame, "FAMÍLIA & PESSOAL", "R$ 0.00", "Transferências / Apoio", "#38bdf8", 2)
         self.kpi_saldo, self.lbl_kpi_saldo = self._criar_card_kpi(kpi_frame, "RESULTADO DE CAIXA", "+R$ 0.00", "Saldo líquido consolidado", "#818cf8", 3)
 
-        # 2. ÁREA DE GRÁFICOS ANALÍTICOS LADO A LADO
         charts_container = ctk.CTkFrame(self.view_dashboard, fg_color="transparent")
         charts_container.pack(fill="both", expand=True, pady=(0, 14))
         charts_container.columnconfigure(0, weight=3)
         charts_container.columnconfigure(1, weight=2)
         charts_container.rowconfigure(0, weight=1)
 
-        # Frame Gráfico 1: Categorias (Barras Horizontais)
         self.frame_graf_cat = ctk.CTkFrame(charts_container, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         self.frame_graf_cat.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
 
@@ -729,7 +682,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         )
         lbl_tit_cat.pack(anchor="w", padx=16, pady=(12, 6))
 
-        # Frame Gráfico 2: Participação Titulares (Donut Chart)
         self.frame_graf_resp = ctk.CTkFrame(charts_container, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         self.frame_graf_resp.grid(row=0, column=1, sticky="nsew", padx=(8, 0))
 
@@ -741,7 +693,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         )
         lbl_tit_resp.pack(anchor="w", padx=16, pady=(12, 6))
 
-        # 3. TERMINAL DE STATUS E LOGS EM TEMPO REAL
         term_frame = ctk.CTkFrame(self.view_dashboard, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         term_frame.pack(fill="x", pady=(0, 4))
 
@@ -760,7 +711,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         card = ctk.CTkFrame(parent, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         card.grid(row=0, column=col, padx=5, sticky="nsew")
 
-        # Indicador de cor
         top_box = ctk.CTkFrame(card, fg_color="transparent")
         top_box.pack(fill="x", padx=16, pady=(14, 4))
 
@@ -786,7 +736,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         return card, lbl_valor
 
     def renderizar_graficos_matplotlib(self):
-        # Limpar widgets anteriores
         for w in self.frame_graf_cat.winfo_children():
             if isinstance(w, tk.Widget) and not isinstance(w, ctk.CTkLabel):
                 w.destroy()
@@ -809,7 +758,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
 
         df_desp["valor_abs"] = df_desp["valor_brl"].abs()
 
-        # 1. GRÁFICO DE BARRAS: DESPESAS POR CATEGORIA
         cat_agg = df_desp.groupby("categoria")["valor_abs"].sum().sort_values(ascending=True)
 
         fig1, ax1 = plt.subplots(figsize=(5.2, 3.0), dpi=100)
@@ -821,7 +769,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
 
         bars = ax1.barh(cat_agg.index, cat_agg.values, color=cores, height=0.6, edgecolor='none')
 
-        # Customização Eixos
         ax1.tick_params(colors='#94a3b8', labelsize=8)
         ax1.spines['top'].set_visible(False)
         ax1.spines['right'].set_visible(False)
@@ -829,7 +776,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         ax1.spines['bottom'].set_color('#1e293b')
         ax1.grid(axis='x', color='#1e293b', linestyle='--', alpha=0.6)
 
-        # Rótulos em R$ na ponta das barras
         for bar in bars:
             largura = bar.get_width()
             ax1.text(
@@ -846,7 +792,7 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         canvas1.draw()
         canvas1.get_tk_widget().pack(fill="both", expand=True, padx=8, pady=(0, 6))
 
-        # 2. GRÁFICO DONUT: DESPESAS POR TITULAR
+        # Donut Chart
         resp_agg = df_desp.groupby("responsavel")["valor_abs"].sum()
 
         fig2, ax2 = plt.subplots(figsize=(3.4, 3.0), dpi=100)
@@ -886,20 +832,19 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         panel = ctk.CTkFrame(self.view_conciliacao, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         panel.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # Header de Ação com Botões de Destaque
         top_ctrl = ctk.CTkFrame(panel, fg_color="transparent")
         top_ctrl.pack(fill="x", padx=18, pady=(16, 12))
 
         ctk.CTkLabel(
             top_ctrl, 
-            text="Fila de Extratos Prontos para Conciliação Automática", 
+            text="Fila de Extratos Prontos para Conciliação Idempotente", 
             font=ctk.CTkFont(size=14, weight="bold"),
             text_color="#f8fafc"
         ).pack(side="left")
 
         self.btn_executar_lote_main = ctk.CTkButton(
             top_ctrl, 
-            text="🚀  Processar e Gravar Fila no SQLite", 
+            text="🚀  Processar e Conciliar Lote", 
             height=38,
             fg_color="#10b981", 
             hover_color="#059669",
@@ -921,7 +866,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         )
         self.btn_import_extratos_main.pack(side="right")
 
-        # Seletores de Atribuição
         attr_frame = ctk.CTkFrame(panel, fg_color="#0b0f17", corner_radius=8)
         attr_frame.pack(fill="x", padx=18, pady=(0, 14))
 
@@ -931,9 +875,8 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self.opt_titular_concil.set("Usuário Titular")
 
         ctk.CTkLabel(attr_frame, text="Pasta Centralizada:", text_color="#94a3b8", font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 8))
-        ctk.CTkLabel(attr_frame, text="entrada/ (Repositório Local)", text_color="#38bdf8", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left")
+        ctk.CTkLabel(attr_frame, text="entrada/ (Deduplicação por Hash/FITID)", text_color="#38bdf8", font=ctk.CTkFont(size=11, weight="bold")).pack(side="left")
 
-        # Visualizador de Arquivos na Fila
         self.txt_lista_lote_main = ctk.CTkTextbox(
             panel, 
             font=ctk.CTkFont(family="Consolas", size=11),
@@ -956,7 +899,8 @@ class FinanceAgentExecutiveApp(ctk.CTk):
                 dt_mod = datetime.fromtimestamp(a.stat().st_mtime).strftime("%d/%m/%Y %H:%M")
                 msg += f" • [{a.suffix.upper()}]  {a.name:<45} | {tam_kb:>7.1f} KB | Modificado: {dt_mod}\n"
             msg += "=" * 80 + "\n"
-            msg += "Clique em 'Processar e Gravar Fila no SQLite' para categorizar e conciliar automaticamente."
+            msg += "Idempotência Ativa: Transações já existentes serão identificadas e ignoradas sem duplicar saldos.\n"
+            msg += "Clique em 'Processar e Conciliar Lote' para iniciar a conciliação estrita."
             self.txt_lista_lote_main.insert("1.0", msg)
         else:
             self.txt_lista_lote_main.insert("1.0", "Nenhum arquivo .ofx ou .csv encontrado na pasta 'entrada/'.\n\nDeposite seus extratos bancários na pasta 'entrada/' ou clique em 'Importar Arquivo Avulso'.")
@@ -968,7 +912,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         panel = ctk.CTkFrame(self.view_extrato, fg_color="#111622", corner_radius=12, border_width=1, border_color="#1e293b")
         panel.pack(fill="both", expand=True, padx=4, pady=4)
 
-        # Barra de Filtros e Exportação
         bar = ctk.CTkFrame(panel, fg_color="transparent")
         bar.pack(fill="x", padx=16, pady=(14, 10))
 
@@ -998,7 +941,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         )
         btn_limpar_busca.pack(side="left")
 
-        # Botão Exportar Excel Profissional
         btn_export_excel = ctk.CTkButton(
             bar, 
             text="📊  Exportar Relatório Excel (.xlsx)", 
@@ -1010,7 +952,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         )
         btn_export_excel.pack(side="right")
 
-        # Tabela TTK Estilizada Dark
         tbl_frame = ctk.CTkFrame(panel, fg_color="#0b0f17", corner_radius=10, border_width=1, border_color="#1e293b")
         tbl_frame.pack(fill="both", expand=True, padx=16, pady=(0, 16))
 
@@ -1036,7 +977,7 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             foreground=[('selected', '#ffffff')]
         )
 
-        colunas = ("id", "data", "origem", "descricao", "categoria", "tipo", "valor", "responsavel")
+        colunas = ("id", "data", "origem", "descricao", "categoria", "tipo", "valor", "responsavel", "fitid")
         self.tree_main = ttk.Treeview(tbl_frame, columns=colunas, show="headings", selectmode="browse")
 
         self.tree_main.heading("id", text="ID")
@@ -1047,15 +988,17 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self.tree_main.heading("tipo", text="Tipo")
         self.tree_main.heading("valor", text="Valor (R$)")
         self.tree_main.heading("responsavel", text="Titular")
+        self.tree_main.heading("fitid", text="Identificador (FITID)")
 
         self.tree_main.column("id", width=45, anchor="center")
         self.tree_main.column("data", width=85, anchor="center")
         self.tree_main.column("origem", width=120, anchor="w")
-        self.tree_main.column("descricao", width=250, anchor="w")
-        self.tree_main.column("categoria", width=170, anchor="w")
+        self.tree_main.column("descricao", width=240, anchor="w")
+        self.tree_main.column("categoria", width=160, anchor="w")
         self.tree_main.column("tipo", width=80, anchor="center")
         self.tree_main.column("valor", width=100, anchor="e")
         self.tree_main.column("responsavel", width=120, anchor="center")
+        self.tree_main.column("fitid", width=130, anchor="center")
 
         sb = ttk.Scrollbar(tbl_frame, orient="vertical", command=self.tree_main.yview)
         self.tree_main.configure(yscrollcommand=sb.set)
@@ -1090,7 +1033,8 @@ class FinanceAgentExecutiveApp(ctk.CTk):
                 row.get("categoria"),
                 row.get("tipo_movimentacao"),
                 v_formatado,
-                row.get("responsavel")
+                row.get("responsavel"),
+                row.get("fitid") or "-"
             ))
 
     # ---------------------------------------------------------
@@ -1114,7 +1058,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         grid.pack(fill="x", padx=24, pady=10)
         grid.columnconfigure((0, 1), weight=1)
 
-        # Data e Titular
         ctk.CTkLabel(grid, text="Data do Gasto:", text_color="#94a3b8").grid(row=0, column=0, sticky="w", pady=(4, 2))
         self.ent_novo_data = ctk.CTkEntry(grid, fg_color="#161b22")
         self.ent_novo_data.insert(0, date.today().strftime("%d/%m/%Y"))
@@ -1125,14 +1068,12 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self.opt_novo_resp.grid(row=1, column=1, sticky="ew", pady=(0, 14))
         self.opt_novo_resp.set("Usuário Titular")
 
-        # Descrição
         ctk.CTkLabel(grid, text="Descrição / Estabelecimento:", text_color="#94a3b8").grid(row=2, column=0, columnspan=2, sticky="w", pady=(4, 2))
         self.ent_novo_desc = ctk.CTkEntry(grid, placeholder_text="Ex: Supermercado Carrefour, Farmácia Raia...", fg_color="#161b22")
         self.ent_novo_desc.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 14))
 
-        # Tipo e Valor
         ctk.CTkLabel(grid, text="Tipo de Movimento:", text_color="#94a3b8").grid(row=4, column=0, sticky="w", pady=(4, 2))
-        self.opt_novo_tipo = ctk.CTkOptionMenu(grid, values=["Despesa", "Receita", "Neutro"], fg_color="#161b22")
+        self.opt_novo_tipo = ctk.CTkOptionMenu(grid, values=["Despesa", "Receita", "Neutro", "Reserva"], fg_color="#161b22")
         self.opt_novo_tipo.grid(row=5, column=0, sticky="ew", padx=(0, 16), pady=(0, 14))
         self.opt_novo_tipo.set("Despesa")
 
@@ -1140,13 +1081,11 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         self.ent_novo_val = ctk.CTkEntry(grid, placeholder_text="Ex: 150,00", fg_color="#161b22")
         self.ent_novo_val.grid(row=5, column=1, sticky="ew", pady=(0, 14))
 
-        # Forma de Pagamento
         ctk.CTkLabel(grid, text="Forma de Pagamento / Origem:", text_color="#94a3b8").grid(row=6, column=0, sticky="w", pady=(4, 2))
         self.opt_novo_origem = ctk.CTkOptionMenu(grid, values=["Cartão de Crédito", "Conta Débito / Pix", "Dinheiro"], fg_color="#161b22")
         self.opt_novo_origem.grid(row=7, column=0, sticky="ew", padx=(0, 16), pady=(0, 24))
         self.opt_novo_origem.set("Cartão de Crédito")
 
-        # Botão Salvar
         btn_salvar = ctk.CTkButton(
             form_box, 
             text="💾  Gravar Lançamento no Banco SQLite", 
@@ -1165,7 +1104,6 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         df = carregar_dados_sqlite()
         arquivos_fila = listar_arquivos_entrada()
 
-        # Atualizar KPIs
         if not df.empty:
             rec = df[df["tipo_movimentacao"] == "Receita"]["valor_brl"].sum()
             desp_op = abs(df[
@@ -1183,11 +1121,10 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         sinal = "+" if saldo >= 0 else ""
         self.lbl_kpi_saldo.configure(text=f"{sinal}R$ {saldo:,.2f}")
 
-        # Atualizar Terminal de Atividades
         total_ofx = len([f for f in arquivos_fila if f.suffix.lower() == ".ofx"])
         total_csv = len([f for f in arquivos_fila if f.suffix.lower() == ".csv"])
 
-        texto_terminal = f"""[SISTEMA CONECTADO] Sessão de Auditoria Financeira Ativa
+        texto_terminal = f"""[SISTEMA CONECTADO] Sessão de Auditoria Financeira Ativa (Modo SQLite WAL)
 • Base Local: {DB_PATH.name} ({len(df)} registros ativos) | Pasta Entrada: {total_ofx} .OFX e {total_csv} .CSV na fila.
 • Diretório de Trabalho: {BASE_DIR}"""
         self.txt_term_dash.delete("1.0", "end")
@@ -1207,6 +1144,7 @@ class FinanceAgentExecutiveApp(ctk.CTk):
         if resp:
             with get_db_connection() as conn:
                 conn.execute("DELETE FROM transacoes")
+                conn.execute("DELETE FROM import_batches")
                 conn.commit()
             self.atualizar_dados()
             messagebox.showinfo("Base Limpa", "🗑️ Todos os registros foram removidos com sucesso.")
@@ -1224,16 +1162,22 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             return
 
         try:
-            val_num = limpar_valor_monetario(val_str)
-        except Exception:
-            messagebox.showerror("Erro", "Valor financeiro inválido.")
+            val_num = limpar_valor_monetario_estrito(val_str)
+        except ValueError as err_v:
+            messagebox.showerror("Erro de Validação", f"Valor financeiro inválido:\n{err_v}")
             return
 
-        val_final = -abs(val_num) if tipo == "Despesa" else abs(val_num)
+        try:
+            data_valida = validar_e_formatar_data_estrita(data_str)
+        except ValueError as err_d:
+            messagebox.showerror("Erro de Validação", f"Data inválida:\n{err_d}")
+            return
+
+        val_final = -abs(val_num) if tipo in ["Despesa", "Reserva"] else abs(val_num)
         cat_calc, _ = classificar_transacao(desc, val_final)
 
-        inserir_transacao_sqlite(
-            data_str=data_str,
+        sucesso = inserir_transacao_sqlite(
+            data_str=data_valida,
             origem=origem,
             descricao=desc,
             categoria=cat_calc,
@@ -1243,11 +1187,14 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             responsavel=resp
         )
 
-        messagebox.showinfo("Sucesso", "✅ Lançamento gravado no SQLite com sucesso!")
-        self.ent_novo_desc.delete(0, "end")
-        self.ent_novo_val.delete(0, "end")
-        self.atualizar_dados()
-        self.navegar_para("extrato")
+        if sucesso:
+            messagebox.showinfo("Sucesso", "✅ Lançamento gravado no SQLite com sucesso!")
+            self.ent_novo_desc.delete(0, "end")
+            self.ent_novo_val.delete(0, "end")
+            self.atualizar_dados()
+            self.navegar_para("extrato")
+        else:
+            messagebox.showwarning("Duplicidade Detectada", "⚠️ Este lançamento exato já existe no banco de dados e foi ignorado para evitar duplicidade.")
 
     def processar_arquivos_lote_ui(self):
         arquivos = listar_arquivos_entrada()
@@ -1256,77 +1203,87 @@ class FinanceAgentExecutiveApp(ctk.CTk):
             return
 
         titular_selecionado = self.opt_titular_concil.get()
-        total_importados = 0
-        arquivos_ok = 0
-        novos_registros = []
+        total_arquivos_proc = 0
+        total_novas_geral = 0
+        total_duplicadas_geral = 0
+        total_rejeitadas_geral = 0
+        log_resumo = []
 
-        for arq in arquivos:
-            try:
-                if arq.suffix.lower() == ".ofx":
+        with get_db_connection() as conn:
+            for arq in arquivos:
+                total_arquivos_proc += 1
+                checksum_arq = calcular_checksum_arquivo(arq)
+                ext = arq.suffix.lower()
+
+                # Parsing Estrito por Tipo de Arquivo
+                if ext == ".ofx":
                     conteudo = arq.read_text(encoding="utf-8", errors="ignore")
-                    trans_ofx = processar_conteudo_ofx(conteudo)
-                    for item in trans_ofx:
-                        cat_calc, tipo_calc = classificar_transacao(item["descricao"], item["valor"])
-                        novos_registros.append((
-                            item["data"],
-                            f"OFX ({arq.name})",
-                            item["descricao"],
-                            cat_calc,
-                            "",
-                            tipo_calc,
-                            item["valor"],
-                            titular_selecionado,
-                            "Efetivado",
-                            item["fitid"]
-                        ))
-                    total_importados += len(trans_ofx)
-                    arquivos_ok += 1
-                elif arq.suffix.lower() == ".csv":
-                    df_c = pd.read_csv(arq)
-                    col_desc = next((c for c in df_c.columns if c.lower() in ["descricao", "estabelecimento", "historico", "lancamento"]), None)
-                    col_val = next((c for c in df_c.columns if c.lower() in ["valor_brl", "valor", "montante", "quantia"]), None)
-                    col_data = next((c for c in df_c.columns if c.lower() in ["data", "dt"]), None)
-                    col_resp = next((c for c in df_c.columns if c.lower() in ["responsavel", "titular"]), None)
-                    
-                    if col_desc and col_val:
-                        for _, r in df_c.iterrows():
-                            desc_val = str(r[col_desc])
-                            val_num = limpar_valor_monetario(r[col_val])
-                            dt_str = str(r[col_data]) if col_data else date.today().strftime("%d/%m/%Y")
-                            resp_val = str(r[col_resp]) if col_resp else titular_selecionado
-                            
-                            cat_calc, tipo_calc = classificar_transacao(desc_val, val_num)
-                            novos_registros.append((
-                                dt_str,
-                                f"CSV ({arq.name})",
-                                sanitizar_texto(desc_val),
-                                cat_calc,
-                                "",
-                                tipo_calc,
-                                val_num,
-                                resp_val,
-                                "Efetivado",
-                                ""
-                            ))
-                        total_importados += len(df_c)
-                        arquivos_ok += 1
-            except Exception as e:
-                print(f"Erro ao processar {arq.name}: {e}")
+                    resultado_parse = parse_ofx_estrito(conteudo, nome_origem=f"OFX ({arq.name})")
+                elif ext == ".csv":
+                    resultado_parse = parse_csv_estrito(arq, titular_padrao=titular_selecionado, nome_origem=f"CSV ({arq.name})")
+                else:
+                    continue
 
-        if novos_registros:
-            with get_db_connection() as conn:
-                conn.executemany("""
-                    INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid)
+                trans_validas = resultado_parse["transacoes"]
+                rejeitadas = resultado_parse["rejeitadas"]
+                total_rejeitadas_geral += len(rejeitadas)
+
+                novas_arquivo = 0
+                duplicadas_arquivo = 0
+
+                for item in trans_validas:
+                    cat_calc, tipo_calc = classificar_transacao(item["descricao"], item["valor"])
+                    resp_trans = item.get("responsavel") or titular_selecionado
+                    fitid_trans = item.get("fitid", "")
+                    data_trans = item["data"]
+                    desc_trans = item["descricao"]
+                    val_trans = item["valor"]
+                    origem_trans = item["origem"]
+
+                    hash_d = gerar_hash_deduplicacao(data_trans, origem_trans, desc_trans, val_trans, resp_trans, fitid_trans)
+
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        INSERT INTO transacoes (data, origem, descricao, categoria, subcategoria, tipo_movimentacao, valor_brl, responsavel, status, fitid, hash_dedup)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Efetivado', ?, ?)
+                        ON CONFLICT(hash_dedup) DO NOTHING
+                    """, (data_trans, origem_trans, desc_trans, cat_calc, "", tipo_calc, val_trans, resp_trans, fitid_trans, hash_d))
+
+                    if cursor.rowcount > 0:
+                        novas_arquivo += 1
+                    else:
+                        duplicadas_arquivo += 1
+
+                total_novas_geral += novas_arquivo
+                total_duplicadas_geral += duplicadas_arquivo
+
+                # Registro de Auditoria do Lote
+                status_lote = "Sucesso" if len(rejeitadas) == 0 else "Sucesso Parcial (com rejeições)"
+                detalhes_lote = f"Encontradas: {resultado_parse['total_encontradas']} | Inseridas: {novas_arquivo} | Duplicadas: {duplicadas_arquivo} | Rejeitadas: {len(rejeitadas)}"
+                
+                conn.execute("""
+                    INSERT INTO import_batches (nome_arquivo, checksum, tipo_arquivo, total_encontradas, total_inseridas, total_duplicadas, total_rejeitadas, titular, status, detalhes)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, novos_registros)
+                """, (arq.name, checksum_arq, ext.upper().replace(".", ""), resultado_parse["total_encontradas"], novas_arquivo, duplicadas_arquivo, len(rejeitadas), titular_selecionado, status_lote, detalhes_lote))
                 conn.commit()
 
-            messagebox.showinfo(
-                "Conciliação em Lote Concluída", 
-                f"✅ Sucesso!\n• Arquivos processados: {arquivos_ok}\n• Transações gravadas: {total_importados}\n• Titular atribuído: {titular_selecionado}"
-            )
-            self.atualizar_dados()
-            self.navegar_para("dashboard")
+                log_resumo.append(f"• {arq.name}: {novas_arquivo} novas, {duplicadas_arquivo} duplicadas ignoradas, {len(rejeitadas)} rejeitadas.")
+
+        self.atualizar_dados()
+        self.navegar_para("dashboard")
+
+        # Relatório de Feedback para o Usuário
+        msg_final = f"📁 Conciliação Idempotente Concluída!\n\n"
+        msg_final += f"• Arquivos processados: {total_arquivos_proc}\n"
+        msg_final += f"• Transações novas gravadas: {total_novas_geral}\n"
+        msg_final += f"• Duplicidades ignoradas com segurança: {total_duplicadas_geral}\n"
+        msg_final += f"• Linhas rejeitadas por inconsistência: {total_rejeitadas_geral}\n\n"
+        msg_final += "\n".join(log_resumo)
+
+        if total_rejeitadas_geral > 0:
+            messagebox.showwarning("Aviso de Auditoria", msg_final)
+        else:
+            messagebox.showinfo("Auditoria & Conciliação", msg_final)
 
     def importar_e_copiar_extratos(self):
         caminhos = filedialog.askopenfilenames(
@@ -1361,7 +1318,7 @@ class FinanceAgentExecutiveApp(ctk.CTk):
                 abrir_pasta_no_sistema(caminho)
 
 # -------------------------------------------------------------
-# 7. EXECUÇÃO PRINCIPAL
+# 5. EXECUÇÃO PRINCIPAL
 # -------------------------------------------------------------
 if __name__ == "__main__":
     app = FinanceAgentExecutiveApp()
