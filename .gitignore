@@ -1,0 +1,85 @@
+# ==============================================================================
+# FinanceAgent - Git Ignore Configuration (Segurança & Portfólio Corporativo)
+# ==============================================================================
+
+# 1. Bancos de Dados Locais e Arquivos Temporários de DB (Privacidade de Dados)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+finanagent.db
+
+# 2. Extratos Bancários Reais & Documentos Financeiros Pessoais
+*.ofx
+*.OFX
+*.csv
+*.CSV
+*.xlsx
+*.XLSX
+*.xls
+*.pdf
+
+# PERMITIR APENAS arquivos de demonstração / mock data na pasta de entrada
+!entrada/exemplo_extrato.ofx
+!entrada/exemplo_extrato.csv
+!entrada/.gitkeep
+
+# 3. Relatórios Gerados e Exportações (Pasta Saída)
+saida/*
+!saida/.gitkeep
+
+# 4. Ambientes Virtuais Python
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# 5. Caches e Compilação Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+develop-eggs/
+dist/
+dist_app/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 6. Artefatos de Build PyInstaller
+build/
+build_app/
+*.manifest
+*.spec.bak
+
+# 7. Ambientes de Desenvolvimento e IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.project
+.pydevproject
+
+# 8. Arquivos de Sistema Operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# 9. Logs e Depuração
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*

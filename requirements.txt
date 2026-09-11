@@ -1,0 +1,18 @@
+# ==============================================================================
+# FinanceAgent - Dependências do Projeto
+# ==============================================================================
+
+# Interface Gráfica Desktop Moderna (Executive Dark SaaS)
+customtkinter>=5.2.0
+
+# Processamento e Manipulação de Dados Estruturados
+pandas>=2.0.0
+
+# Visualização de Dados e Gráficos Nativos Tkinter
+matplotlib>=3.7.0
+
+# Geração e Formatação Avançada de Planilhas Executivas Excel (.xlsx)
+openpyxl>=3.1.0
+
+# Empacotamento de Executável Standalone Desktop (.exe)
+pyinstaller>=6.0.0

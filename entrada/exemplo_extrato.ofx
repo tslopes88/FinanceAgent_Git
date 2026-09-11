@@ -1,0 +1,208 @@
+OFXHEADER:100
+DATA:OFXSGML
+VERSION:102
+SECURITY:NONE
+ENCODING:UTF-8
+CHARSET:NONE
+COMPRESSION:NONE
+OLDFILEVERSION:NONE
+NEWFILEVERSION:NONE
+
+<OFX>
+  <SIGNONMSGSRSV1>
+    <SONRS>
+      <STATUS>
+        <CODE>0</CODE>
+        <SEVERITY>INFO</SEVERITY>
+      </STATUS>
+      <DTSERVER>20260910120000[-03:BRT]</DTSERVER>
+      <LANGUAGE>POR</LANGUAGE>
+      <FI>
+        <ORG>Banco Demonstração S.A.</ORG>
+        <FID>999</FID>
+      </FI>
+    </SONRS>
+  </SIGNONMSGSRSV1>
+  <BANKMSGSRSV1>
+    <STMTTRNRS>
+      <TRNUID>1001</TRNUID>
+      <STATUS>
+        <CODE>0</CODE>
+        <SEVERITY>INFO</SEVERITY>
+      </STATUS>
+      <STMTRS>
+        <CURDEF>BRL</CURDEF>
+        <BANKACCTFROM>
+          <BANKID>999</BANKID>
+          <ACCTID>12345-6</ACCTID>
+          <ACCTTYPE>CHECKING</ACCTTYPE>
+        </BANKACCTFROM>
+        <BANKTRANLIST>
+          <DTSTART>20260901000000[-03:BRT]</DTSTART>
+          <DTEND>20260910235959[-03:BRT]</DTEND>
+
+          <!-- Receitas & Faturamento de Serviços -->
+          <STMTTRN>
+            <TRNTYPE>CREDIT</TRNTYPE>
+            <DTPOSTED>20260901100000</DTPOSTED>
+            <TRNAMT>4850.00</TRNAMT>
+            <FITID>DEMO20260901001</FITID>
+            <MEMO>PIX RECEBIDO - CONSULTORIA TI CLIENTE ALFA</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>CREDIT</TRNTYPE>
+            <DTPOSTED>20260902143000</DTPOSTED>
+            <TRNAMT>3200.00</TRNAMT>
+            <FITID>DEMO20260902002</FITID>
+            <MEMO>TED RECEBIDA - PROJETO SOFTWARE CLIENTE BETA</MEMO>
+          </STMTTRN>
+
+          <!-- Rendimento Financeiro / CDI -->
+          <STMTTRN>
+            <TRNTYPE>CREDIT</TRNTYPE>
+            <DTPOSTED>20260903080000</DTPOSTED>
+            <TRNAMT>142.50</TRNAMT>
+            <FITID>DEMO20260903003</FITID>
+            <MEMO>RENDIMENTO APLICACAO AUTOMATICA CDI</MEMO>
+          </STMTTRN>
+
+          <!-- Transporte & Mobilidade -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260903111500</DTPOSTED>
+            <TRNAMT>-245.80</TRNAMT>
+            <FITID>DEMO20260903004</FITID>
+            <MEMO>POSTO SHELL COMBUSTIVEL</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260904092000</DTPOSTED>
+            <TRNAMT>-38.50</TRNAMT>
+            <FITID>DEMO20260904005</FITID>
+            <MEMO>UBER *TRIP VIAGEM URBANA</MEMO>
+          </STMTTRN>
+
+          <!-- Alimentação - Supermercados -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260904174500</DTPOSTED>
+            <TRNAMT>-482.35</TRNAMT>
+            <FITID>DEMO20260904006</FITID>
+            <MEMO>SUPERMERCADO CARREFOUR COMPRAS MES</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260905101000</DTPOSTED>
+            <TRNAMT>-198.40</TRNAMT>
+            <FITID>DEMO20260905007</FITID>
+            <MEMO>HORTIFRUTI NATURAL DA TERRA</MEMO>
+          </STMTTRN>
+
+          <!-- Alimentação - Padarias & Cafés -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260905163000</DTPOSTED>
+            <TRNAMT>-45.90</TRNAMT>
+            <FITID>DEMO20260905008</FITID>
+            <MEMO>PADARIA CELEIRO DO PAO</MEMO>
+          </STMTTRN>
+
+          <!-- Alimentação - Restaurantes & Delivery -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260906201500</DTPOSTED>
+            <TRNAMT>-112.00</TRNAMT>
+            <FITID>DEMO20260906009</FITID>
+            <MEMO>IFOOD *RESTAURANTE BURGER</MEMO>
+          </STMTTRN>
+
+          <!-- Saúde & Farmácia -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260907114000</DTPOSTED>
+            <TRNAMT>-125.60</TRNAMT>
+            <FITID>DEMO20260907010</FITID>
+            <MEMO>DROGASIL FARMACIA MEDICAMENTOS</MEMO>
+          </STMTTRN>
+
+          <!-- Assinaturas & Softwares -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260907150000</DTPOSTED>
+            <TRNAMT>-55.90</TRNAMT>
+            <FITID>DEMO20260907011</FITID>
+            <MEMO>NETFLIX.COM MENSALIDADE</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260908080000</DTPOSTED>
+            <TRNAMT>-34.90</TRNAMT>
+            <FITID>DEMO20260908012</FITID>
+            <MEMO>SPOTIFY ASSINATURA FAMILIAR</MEMO>
+          </STMTTRN>
+
+          <!-- Compras & Varejo -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260908142200</DTPOSTED>
+            <TRNAMT>-289.90</TRNAMT>
+            <FITID>DEMO20260908013</FITID>
+            <MEMO>MERCADO LIVRE ELETRONICOS</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260908191000</DTPOSTED>
+            <TRNAMT>-159.00</TRNAMT>
+            <FITID>DEMO20260908014</FITID>
+            <MEMO>AMAZON BR MARKETPLACE</MEMO>
+          </STMTTRN>
+
+          <!-- Tarifas & Encargos Bancários -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260909050000</DTPOSTED>
+            <TRNAMT>-42.00</TRNAMT>
+            <FITID>DEMO20260909015</FITID>
+            <MEMO>TARIFA MENSAL PACOTE SERVICOS</MEMO>
+          </STMTTRN>
+
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260909050500</DTPOSTED>
+            <TRNAMT>-8.45</TRNAMT>
+            <FITID>DEMO20260909016</FITID>
+            <MEMO>IOF OPERACOES FINANCEIRAS</MEMO>
+          </STMTTRN>
+
+          <!-- Despesas Compartilhadas / Família -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260909183000</DTPOSTED>
+            <TRNAMT>-650.00</TRNAMT>
+            <FITID>DEMO20260909017</FITID>
+            <MEMO>TRANSFERENCIA PIX REPASSE FAMILIAR</MEMO>
+          </STMTTRN>
+
+          <!-- Investimentos & Reserva -->
+          <STMTTRN>
+            <TRNTYPE>DEBIT</TRNTYPE>
+            <DTPOSTED>20260910090000</DTPOSTED>
+            <TRNAMT>-1000.00</TRNAMT>
+            <FITID>DEMO20260910018</FITID>
+            <MEMO>APLICACAO COFRINHO RESERVA DE EMERGENCIA</MEMO>
+          </STMTTRN>
+
+        </BANKTRANLIST>
+        <LEDGERBAL>
+          <BALAMT>5177.65</BALAMT>
+          <DTASOF>20260910235959[-03:BRT]</DTASOF>
+        </LEDGERBAL>
+      </STMTRS>
+    </STMTTRNRS>
+  </BANKMSGSRSV1>
+</OFX>

@@ -1,0 +1,13 @@
+Data,Origem,Descricao,Categoria,Subcategoria,Tipo_Movimentacao,Valor_BRL,Responsavel,Status
+01/09/2026,Extrato CSV,PIX RECEBIDO CONSULTORIA ALFA,Receitas Externas,Servicos,Receita,4850.00,Compartilhado,Efetivado
+02/09/2026,Extrato CSV,TED PROJETO SOFTWARE BETA,Receitas Externas,Software,Receita,3200.00,Compartilhado,Efetivado
+03/09/2026,Extrato CSV,POSTO SHELL COMBUSTIVEL,Transporte & Mobilidade,Gasolina,Despesa,-245.80,Usuário Titular,Efetivado
+04/09/2026,Extrato CSV,SUPERMERCADO CARREFOUR,Alimentação - Supermercados,Mensal,Despesa,-482.35,Usuário Secundário,Efetivado
+05/09/2026,Extrato CSV,PADARIA CELEIRO DO PAO,Alimentação - Padarias,Cafe,Despesa,-45.90,Usuário Titular,Efetivado
+06/09/2026,Extrato CSV,IFOOD RESTAURANTE BURGER,Alimentação - Restaurantes,Lanches,Despesa,-112.00,Compartilhado,Efetivado
+07/09/2026,Extrato CSV,DROGASIL FARMACIA MEDICAMENTOS,Saúde & Farmácia,Farmacia,Despesa,-125.60,Compartilhado,Efetivado
+07/09/2026,Extrato CSV,NETFLIX ASSINATURA STREAMING,Assinaturas & Apps,Streaming,Despesa,-55.90,Usuário Titular,Efetivado
+08/09/2026,Extrato CSV,MERCADO LIVRE ELETRONICOS,Compras & Varejo,Compras,Despesa,-289.90,Usuário Titular,Efetivado
+09/09/2026,Extrato CSV,TARIFA MENSAL PACOTE SERVICOS,Tarifas Bancárias,Tarifas,Despesa,-42.00,Compartilhado,Efetivado
+09/09/2026,Extrato CSV,TRANSFERENCIA PIX REPASSE FAMILIAR,Família & Pessoal,Repasse,Despesa,-650.00,Usuário Secundário,Efetivado
+10/09/2026,Extrato CSV,APLICACAO COFRINHO RESERVA,Investimentos & Reserva,Investimento,Reserva,-1000.00,Compartilhado,Efetivado
