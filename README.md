@@ -1,4 +1,4 @@
-# 💎 FinanceAgent — Banking Conciliation & Financial Intelligence Platform
+# 💎 FinanceAgent — Bank Reconciliation & Financial Intelligence Platform
 
 <div align="center">
 
@@ -85,7 +85,8 @@ FinanceAgent/
 │   └── .gitkeep
 ├── saida/                    # Diretório de destino de relatórios gerados (.xlsx, .png)
 │   └── .gitkeep
-├── app.py                    # Aplicação principal (GUI, navegação e views)
+├── app.py                    # Aplicação principal (GUI, navegação, views e workers)
+├── theme.py                  # Design System & Tokens Visuais (Executive Dark SaaS)
 ├── process_extrato.py        # Motor de processamento, regras de regex e tetos
 ├── generate_excel.py         # Módulo de exportação de relatórios avançados em Excel
 ├── generate_charts.py        # Geração autônoma de gráficos estatísticos
@@ -119,8 +120,8 @@ O repositório inclui um script inteligente que cria automaticamente o ambiente 
 
 1. **Clone o repositório:**
    ```bash
-   git clone https://github.com/SEU_USUARIO/FinanceAgent.git
-   cd FinanceAgent
+   git clone https://github.com/tslopes88/FinanceAgent_Git.git
+   cd FinanceAgent_Git
    ```
 
 2. **Crie e ative o ambiente virtual:**
